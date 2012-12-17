@@ -3,7 +3,9 @@ library(maptools)
 library(gstat)
 library(sp)
 library(plyr)
-
+library(SDMTools)
+library(latticeExtra)
+library(grid)
 
 ################
 # Prediction   #
@@ -11,11 +13,12 @@ library(plyr)
 ################
 
 makeGrid <- function(dir, res){
-
+	#dir <- paste("C:\\Users\\dylan.mcleod\\Google Drive\\Study\\Summer Research Scholarship 2012\\Weather\\Shapefiles")
 	setwd(dir)
 
 	###import geographic border from shape file
 	border<-readOGR("map1.shp", "map1")
+
 
 	###Border bounds (in GPS degrees) stored in vals
 	vals <- border@bbox
@@ -85,6 +88,20 @@ loadData <- function(dir){
 	fileList <- list.files()
 	allData <- lapply(fileList, read.table, header = TRUE, sep= "\t")
 	return(allData)
+}
+
+##################
+# Load Elevation #
+# Data           #
+##################
+
+loadDem <- function(dir){
+
+	setwd(dir)
+	elevation<-read.asciigrid("elevation.asc")
+	proj4string(elevation)=CRS("+init=epsg:4326")
+	return(elevation)
+	#image(elevation)
 }
 
 
@@ -189,9 +206,9 @@ ordKrigMod <- function(data, model){
 #######################
 
 ordKrigTester <- function(nona,valSets,varMod){
-
+	
 	varMod = model
-
+	
 	test <- valSets[[1]]
 	training <- valSets[[2]]
 	krig<-krige(MaxTemp~1,training,model=varMod,newdata=test)
@@ -209,6 +226,18 @@ ordKriger <- function(data,varMod){
 	abline(0,1,col="red",cex=0.5)
 }
 
+#############
+# Transform #
+#############
+
+trans <- function(dFrame)
+{
+	dFrame = transform(dFrame, Elevation = log(Elevation))
+	coordinates(dFrame)=~Lon+Lat
+	proj4string(dFrame)=CRS("+init=epsg:4326")
+	return(dFrame)
+}
+
 
 #####################
 # CoKrig Validation #
@@ -223,13 +252,16 @@ coKrigTester <- function(nona,valSets,model){
 	test <- valSets[[1]]
 	training <- valSets[[2]]
 
+	test = trans(test)
+	training = trans(training)
+
 	###Create gstat object for training set
 	gv<-gstat(id="MaxTemp",formula=MaxTemp~1,data=training)
 	gv<-gstat(gv,id="Elevation",formula=Elevation~1,data=training)
 
 	###Fit linear model of coregionalisation of training set
 	gv<-gstat(gv,id=c("MaxTemp","Elevation"),model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,nugget=0))
-	gv<-fit.lmc(variogram(gv),gv,model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,nugget=0))
+	gv<-fit.lmc(variogram(gv),gv,model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,range=70,nugget=0))
 
 	#plot(variogram(gv),gv$model)
 
@@ -253,10 +285,25 @@ coKrigTester <- function(nona,valSets,model){
 # CoKriger #
 ############
 
-coKriger <- function(nona,data,model){
+coKriger <- function(nona,data,elevation,model){
 
+	#nona <- predGrid
+	#model <- "Lin"
+	#data <- sampleData
+	#elevation<-elevData
 	modChoice <- paste(model)
+	str(as.data.frame(data))	
+
+	over=overlay(elevation,nona)
+	nona$elevation=over$elevation.asc
+
+	nona <- transform(nona, elevation = log(elevation))
+	coordinates(nona)=~x+y
+	proj4string(nona)=CRS("+init=epsg:4326")
+
+	data <- trans(data)
 	
+
 	###Create gstat object containing variate and covariate
 	g<-gstat(id="MaxTemp",formula=MaxTemp~1,data=data)
 	g<-gstat(g,id="Elevation",formula=Elevation~1,data=data)
@@ -266,8 +313,8 @@ coKriger <- function(nona,data,model){
 	#plot(vario)
 
 	###Fit linear model of coregionalisation
-	g<-gstat(g,id=c("MaxTemp","Elevation"),model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=60,nugget=0))
-	g<-fit.lmc(vario,g,model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=60,rangenugget=0))
+	g<-gstat(g,id=c("MaxTemp","Elevation"),model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=70,nugget=0))
+	g<-fit.lmc(vario,g,model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=70,rangenugget=0))
 	#plot(vario,g$model)
 	k<-predict.gstat(g,nona)
 
@@ -286,11 +333,11 @@ ordKrigVisualise <- function(data,varMod,nona){
 
 coKrigVisualise <- function(k){
 	###Map predictions
-	spplot(k,"MaxTemp.pred",col.regions=heat.colors(20),main="Prediction Map",scales=list(draw=T))
+	cuts <- seq(floor(min(k$MaxTemp.pred)), ceiling(max(k$MaxTemp.pred)), length.out=11)
+	col.regions <- brewer.pal(length(cuts)+3-1, "RdBu")
+	col.regions <-rev(col.regions)
+	print(spplot(k,"MaxTemp.pred",cuts=cuts,col.regions=col.regions,main="Prediction Map",colorkey=list(labels=list(at=cuts),at=cuts), pretty=TRUE, scales=list(draw=T)))
 
-	###Map errors
-	#spplot(k,"MaxTemp.var",col.regions=terrain.colors(20),main="Error Map",scales=list(draw=T))
-	#help(spplot)
 }
 
 
@@ -304,6 +351,12 @@ predGrid <- makeGrid(mapDir, 0.03)
 
 dataDir <- paste("C:\\Users\\dylan.mcleod\\Google Drive\\Study\\Summer Research Scholarship 2012\\Weather\\Temperature")
 allData <- loadData(dataDir)
+
+covDir <- paste("C:\\Users\\dylan.mcleod\\Google Drive\\Study\\Summer Research Scholarship 2012\\Weather\\Elevation Data\\Cropped DEM")
+elevData <- loadDem(covDir)
+image(elevData)
+
+
 
 iters <- 100
 sqErrKrig <- numeric(iters)
@@ -325,6 +378,7 @@ ordKrigVisualise(sampleData,model,predGrid)
 
 
 allData <- loadData(dataDir)
+
 sqErrCoKrig <- numeric(iters)
 
 for(i in 1:iters){
@@ -332,12 +386,20 @@ for(i in 1:iters){
 	sampleData <- getSample(sampleDate,allData)
 	valSets <- testSplitter(sampleData, 0.25)
 	sqErrCoKrig[i] <- coKrigTester(predGrid,valSets,"Lin")
-	#sqErrCoKrig <- coKrigTester(predGrid,valSets,"Gau")
+	#sqErrCoKrig <- coKrigTester(predGrid,valSets,"Lin")
 }
 
 rootMeanSqrErr <- sqrt(mean(sqErrCoKrig, trim=.1))
 
 
-krigedGrid <- coKriger(predGrid,sampleData,"Lin")
+krigedGrid <- coKriger(predGrid,sampleData,elevData,"Lin")
+krigedGrid$MaxTemp.pred
 #krigedGrid <- coKriger(predGrid,sampleData,"Gau")
 coKrigVisualise(krigedGrid)
+
+
+
+
+
+
+
