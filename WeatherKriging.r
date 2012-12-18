@@ -5,7 +5,6 @@ library(sp)
 library(plyr)
 library(SDMTools)
 library(latticeExtra)
-library(grid)
 
 ################
 # Prediction   #
@@ -178,6 +177,21 @@ testSplitter <- function(data,testFraction){
 	return(valSets)
 }
 
+#################
+# Date Iterator #
+#################
+
+dateIterator <- function(startDate){
+	date <- startDate
+	date <- as.Date(date)
+	date <- date+1
+	year <- as.numeric(format(date, format = "%Y"))
+	month <- as.numeric(format(date, format = "%m"))
+	day <- as.numeric(format(date, format = "%d"))
+	return(c(year,month,day))
+	
+}
+
 ################################
 # Ord Krig Variogram Modelling #
 ################################
@@ -190,8 +204,8 @@ ordKrigMod <- function(data, model){
 	samplevgm <- variogram(MaxTemp~1, data)
 	#plot(samplevgm)
 
-	###Variogram model generated. Sill set to variance, dist. Model selected based on parameter passed. Range estimated as 60 (Gau). Nugget set to 0.
-	mod<-vgm(psill=var(data$MaxTemp),model=modChoice,range=60,nugget=0)
+	###Variogram model generated. Sill set to variance, dist. Model selected based on parameter passed. Range estimated as 70 (Gau). Nugget set to 0.
+	mod<-vgm(psill=var(data$MaxTemp),model=modChoice,range=70,nugget=0)
 	# help(vgm)
 	# print(mod)
 
@@ -239,19 +253,73 @@ trans <- function(dFrame)
 }
 
 
+##############
+# Validation #
+##############
+
+validation <- function(type, nona, valSet, model, range = 70){
+	#valSet <- sampleData
+	#model <- "Lin"
+	#type <- "cokrig"
+	modChoice <- paste(model)
+	typeChoice <- paste(type)
+	rawResults <- matrix(0,length(valSet), 2)
+	procResults <- vector(mode = "numeric", 4)
+
+	if(type == "ordkrig"){
+		for(i in 1:length(valSet)){
+			test <- valSet[i,]
+			training <- valSet[-i,]
+			krig<-krige(MaxTemp~1,training,model=model,newdata=test)
+			rawResults[i,1] <- test$MaxTemp
+			rawResults[i,2] <- krig$var1.pred
+		}
+	} else if(type == "cokrig"){
+		for(i in 1:length(valSet)){
+			test <- valSet[i,]
+			training <- valSet[-i,]
+			test = trans(test)
+			training = trans(training)
+			gv <- gstat(id="MaxTemp",formula=MaxTemp~1,data=training)
+			gv <- gstat(gv,id="Elevation",formula=Elevation~1,data=training)
+			vario <- variogram(gv)
+			gv <- gstat(gv,id=c("MaxTemp","Elevation"),model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,range=range, nugget=0))
+			gv <- fit.lmc(vario,gv,model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,range=range,rangenugget=0))
+			cokrig<-predict.gstat(gv,test)
+			rawResults[i,1] <- test$MaxTemp
+			rawResults[i,2] <- cokrig$MaxTemp.pred
+		}
+	}else{}
+	# Mean residual (sqrt(sumofsquares))
+	procResults[1] <- sqrt(mean((rawResults[,1]-rawResults[,2])^2))
+
+	# Median absolute deviation
+	procResults[2] <- mad(sqrt(((rawResults[,1]-rawResults[,2])^2)), center = median(sqrt((rawResults[,1]-rawResults[,2])^2)))
+		
+	# Standard deviation of residuals
+	procResults[3] <- sd(sqrt((rawResults[,1]-rawResults[,2])^2))
+		
+	# Spearman's rank correlation coefficient
+	procResults[4] <-as.numeric(cor.test(rawResults[,1],rawResults[,2], method = "spearman")$estimate)
+
+	return(procResults)
+}
+
+
+
 #####################
 # CoKrig Validation #
 #####################
 
-coKrigTester <- function(nona,valSets,model){
+coKrigTester <- function(nona,valSets,model,range){
 
 	#nona <- predGrid
 	#model <- "Lin"
 	modChoice <- paste(model)
-
 	test <- valSets[[1]]
 	training <- valSets[[2]]
-
+	#over=overlay(elevation,test)
+	#names(test)[names(test)=="elevation.asc"] <- "Elevation"
 	test = trans(test)
 	training = trans(training)
 
@@ -261,12 +329,11 @@ coKrigTester <- function(nona,valSets,model){
 
 	###Fit linear model of coregionalisation of training set
 	gv<-gstat(gv,id=c("MaxTemp","Elevation"),model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,nugget=0))
-	gv<-fit.lmc(variogram(gv),gv,model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,range=70,nugget=0))
+	gv<-fit.lmc(variogram(gv),gv,model=vgm(psill=cov(training$MaxTemp,training$Elevation),model=modChoice,range=range,nugget=0))
 
 	#plot(variogram(gv),gv$model)
 
 	cokrig<-predict.gstat(gv,test)
-	help(predict.gstat)
 
 	###Residual metrics
 	#CVRSQR<-as.numeric(cor.test(test$MaxTemp,cokrig$MaxTemp.pred)$estimate)^2	#Pearson's Correlation Coefficient
@@ -285,14 +352,13 @@ coKrigTester <- function(nona,valSets,model){
 # CoKriger #
 ############
 
-coKriger <- function(nona,data,elevation,model){
+coKriger <- function(nona,data,elevation,model,range){
 
 	#nona <- predGrid
 	#model <- "Lin"
 	#data <- sampleData
 	#elevation<-elevData
 	modChoice <- paste(model)
-	str(as.data.frame(data))	
 
 	over=overlay(elevation,nona)
 	nona$elevation=over$elevation.asc
@@ -313,8 +379,8 @@ coKriger <- function(nona,data,elevation,model){
 	#plot(vario)
 
 	###Fit linear model of coregionalisation
-	g<-gstat(g,id=c("MaxTemp","Elevation"),model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=70,nugget=0))
-	g<-fit.lmc(vario,g,model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=70,rangenugget=0))
+	g<-gstat(g,id=c("MaxTemp","Elevation"),model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=range,nugget=0))
+	g<-fit.lmc(vario,g,model=vgm(psill=cov(data$MaxTemp,data$Elevation),model=modChoice,range=range,rangenugget=0))
 	#plot(vario,g$model)
 	k<-predict.gstat(g,nona)
 
@@ -328,15 +394,15 @@ coKriger <- function(nona,data,elevation,model){
 
 ordKrigVisualise <- function(data,varMod,nona){
 	map<-krige(MaxTemp~1, data, model=varMod, newdata=nona)
-	spplot(map,"var1.pred",col.regions=heat.colors(20),main="Prediction Map",scales=list(draw=T))
+	spplot(map,"var1.pred",col.regions=colorRampPalette(c('dark blue','white','dark red')),main="Ord Krig Prediction Map (Temp)",scales=list(draw=T))
 }
 
 coKrigVisualise <- function(k){
 	###Map predictions
 	cuts <- seq(floor(min(k$MaxTemp.pred)), ceiling(max(k$MaxTemp.pred)), length.out=11)
-	col.regions <- brewer.pal(length(cuts)+3-1, "RdBu")
+	col.regions <- brewer.pal(n=11, "RdBu")
 	col.regions <-rev(col.regions)
-	print(spplot(k,"MaxTemp.pred",cuts=cuts,col.regions=col.regions,main="Prediction Map",colorkey=list(labels=list(at=cuts),at=cuts), pretty=TRUE, scales=list(draw=T)))
+	print(spplot(k,"MaxTemp.pred",cuts=cuts,col.regions=col.regions,main="Co-Krig Prediction Map (Temp-Elevation)",colorkey=list(labels=list(at=cuts),at=cuts), pretty=TRUE, scales=list(draw=T)))
 
 }
 
@@ -354,50 +420,71 @@ allData <- loadData(dataDir)
 
 covDir <- paste("C:\\Users\\dylan.mcleod\\Google Drive\\Study\\Summer Research Scholarship 2012\\Weather\\Elevation Data\\Cropped DEM")
 elevData <- loadDem(covDir)
-image(elevData)
+image(elevData, col = topo.colors(20))
 
 
 
-iters <- 100
-sqErrKrig <- numeric(iters)
+iters <- 730
+resultsKrig <- matrix(data = NA, nrow = iters, ncol = 4)
+colnames(resultsKrig) = c("MeanResidual", "MedianAbsDev", "StdDevofResiduals", "Spearman")
+
+resultsKrigGau <- matrix(data = NA, nrow = iters, ncol = 4)
+colnames(resultsKrig) = c("MeanResidual", "MedianAbsDev", "StdDevofResiduals", "Spearman")
+
+resultsCoKrig <- matrix(data = NA, nrow = iters, ncol = 4)
+colnames(resultsCoKrig) = c("MeanResidual", "MedianAbsDev", "StdDevofResiduals", "Spearman")
+
+resultsCoKrigGau <- matrix(data = NA, nrow = iters, ncol = 4)
+colnames(resultsCoKrigGau) = c("MeanResidual", "MedianAbsDev", "StdDevofResiduals", "Spearman")
+
+sampleDate <- dateIterator("2009-12-31")
 
 for(i in 1:iters){
-	sampleDate <- dateRandomiser()
 	sampleData <- getSample(sampleDate,allData)
-	sampleData$Elevation <- NULL
 	model <- ordKrigMod(sampleData, "Lin")
-	#model <- ordKrigMod(sampleData, "Gau")
-	valSets <- testSplitter(sampleData, 0.25)
-	sqErrKrig[i] <- ordKrigTester(predGrid,valSets,model)
+	resultsKrig[i,] <- validation("ordkrig", predGrid, sampleData, model)
+	model <- ordKrigMod(sampleData, "Gau")
+	
+	setwd("C:\\Users\\dylan.mcleod\\Google Drive\\Study\\Summer Research Scholarship 2012\\Weather\\Output\\OrdKrig")
+	name = (cbind(paste(sampleDate, collapse = "-"),".png"))
+	png(filename= paste(name, collapse=""))
+	ordKrigVisualise(sampleData,model,predGrid)
+	dev.off()
+	help(paste)
+
+	resultsKrigGau[i,] <- validation("ordkrig", predGrid, sampleData, model, 80)
+	resultsCoKrig[i,] <- validation("cokrig",predGrid, sampleData, "Lin")
+	krigedGrid <- coKriger(predGrid,sampleData,elevData,"Lin",80)
+	
+	setwd("C:\\Users\\dylan.mcleod\\Google Drive\\Study\\Summer Research Scholarship 2012\\Weather\\Output\\CoKrig")
+	png(filename= paste(name, collapse=""))
+	coKrigVisualise(krigedGrid)
+	dev.off()
+
+	resultsCoKrigGau[i,] <- validation("cokrig", predGrid, sampleData, "Gau", 80)
+	sampleDate <- dateIterator(paste(sampleDate, collapse = "-"))
 }
-rootMeanSqrErr <- sqrt(mean(sqErrKrig, trim=.1))
+
+resultsKrig
+resultsKrigGau
+resultsCoKrig
+resultsCoKrigGau
+
+meanResultsKrig <- c((mean(resultsKrig[,1])), (mean(resultsKrig[,2])), (mean(resultsKrig[,3])), (mean(resultsKrig[,4])))
+meanResultsKrigGau <- c((mean(resultsKrigGau[,1])), (mean(resultsKrigGau[,2])), (mean(resultsKrigGau[,3])), (mean(resultsKrigGau[,4])))
+meanResultsCoKrig <- c((mean(resultsCoKrig[,1])), (mean(resultsCoKrig[,2])), (mean(resultsCoKrig[,3])), (mean(resultsCoKrig[,4])))
+meanResultsCoKrigGau <- c((mean(resultsCoKrigGau[,1])), (mean(resultsCoKrigGau[,2])), (mean(resultsCoKrigGau[,3])), (mean(resultsCoKrigGau[,4])))
+
+#ordKrigVisualise(sampleData,model,predGrid)
+#krigedGrid <- coKriger(predGrid,sampleData,elevData,"Lin",80)
+#krigedGrid$MaxTemp.pred
+#krigedGrid <- coKriger(predGrid,sampleData,elevData,"Gau",80)
+#coKrigVisualise(krigedGrid)
 
 
-ordKrigVisualise(sampleData,model,predGrid)
 
-
-
-allData <- loadData(dataDir)
-
-sqErrCoKrig <- numeric(iters)
-
-for(i in 1:iters){
-	sampleDate <- dateRandomiser()
-	sampleData <- getSample(sampleDate,allData)
-	valSets <- testSplitter(sampleData, 0.25)
-	sqErrCoKrig[i] <- coKrigTester(predGrid,valSets,"Lin")
-	#sqErrCoKrig <- coKrigTester(predGrid,valSets,"Lin")
-}
-
-rootMeanSqrErr <- sqrt(mean(sqErrCoKrig, trim=.1))
-
-
-krigedGrid <- coKriger(predGrid,sampleData,elevData,"Lin")
-krigedGrid$MaxTemp.pred
-#krigedGrid <- coKriger(predGrid,sampleData,"Gau")
-coKrigVisualise(krigedGrid)
-
-
+#sampleDate <- dateRandomiser()
+#sampleData <- getSample(sampleDate,allData)
 
 
 
